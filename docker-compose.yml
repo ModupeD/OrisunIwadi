@@ -1,0 +1,43 @@
+# Local stand-ins for AWS: Postgres (RDS later) and SeaweedFS as an S3-compatible store (S3 later).
+name: orisun-iwadi
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      retries: 10
+
+  s3:
+    image: chrislusf/seaweedfs:3.97
+    command: server -ip=s3 -ip.bind=0.0.0.0 -dir=/data -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json
+    ports:
+      - "8333:8333"   # S3 API
+    volumes:
+      - s3data:/data
+      - ./local/seaweedfs-s3.json:/etc/seaweedfs/s3.json:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9333/cluster/status >/dev/null"]
+      interval: 5s
+      retries: 20
+
+  # One-shot job that creates the raw-data bucket (safe to re-run)
+  s3-init:
+    image: chrislusf/seaweedfs:3.97
+    depends_on:
+      s3:
+        condition: service_healthy
+    entrypoint: >
+      sh -c "sleep 3; echo 's3.bucket.create -name ${S3_BUCKET}' | weed shell -master=s3:9333 || true"
+
+volumes:
+  pgdata:
+  s3data:

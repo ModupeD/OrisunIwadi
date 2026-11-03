@@ -1,0 +1,9 @@
+{
+  "identities": [
+    {
+      "name": "local-admin",
+      "credentials": [{ "accessKey": "orisun", "secretKey": "orisun-local-secret" }],
+      "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+    }
+  ]
+}
