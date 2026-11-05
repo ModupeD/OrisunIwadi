@@ -131,6 +131,7 @@ happen (`tests/integration/test_fault_tolerance.py`, `tests/unit/test_api.py`).
 | Slow or heavy API query | Cut off after 5 s (set on the database user and the connection). At most 10 connections per API copy and 20 queued requests; beyond that, instant 503. |
 | One side floods the database | Separate database users with separate connection limits (20 each), so the API can't starve the pipeline or the reverse. |
 | Bug in the API | The API's database user is read-only; it cannot change data. The pipeline's user cannot read logins. |
+| Database fails during an export | Parquet is built fully before sending, so the client gets a 503, never a broken file. A CSV is streamed; the first batch is read before sending (so most failures are a 503), and a failure later cuts the connection so the client sees an incomplete download (curl exit 18), not a short file that looks complete. Exports read in 5,000-row batches through a server-side cursor and are capped at 200,000 rows. |
 
 Database users (`local/db-roles.sql`, applied by `make up`):
 
@@ -148,7 +149,7 @@ RDS Multi-AZ, 2+ API tasks across Availability Zones, and S3 (see section 3).
 | Role | Can use |
 |---|---|
 | `viewer` | dataset list, summaries, grouped counts (groups under 10 rows hidden) |
-| `researcher` | + row-level data with `?column=value` filters and paging |
+| `researcher` | + row-level data with `?column=value` filters and paging; CSV/Parquet exports |
 | `admin` | + quarantine and run log |
 
 - Login (`POST /auth/token`) returns a 30-minute JWT (HS256, algorithm pinned, issuer checked).
@@ -157,34 +158,37 @@ RDS Multi-AZ, 2+ API tasks across Availability Zones, and S3 (see section 3).
 - Dataset and column names from the URL are checked against the dataset definitions before any
   SQL is built; values are always bound parameters.
 
-## 3. AWS deployment (planned)
+## 3. AWS deployment
+
+Defined in Terraform under `infra/` and described in [aws.md](aws.md): what is created, least
+privilege, fault tolerance, cost, and how to deploy.
 
 ```mermaid
 flowchart TB
-    GHA["GitHub Actions<br/>test, terraform plan, build"] -->|OIDC| AWS
     subgraph AWS["AWS · us-east-1"]
         subgraph VPC["VPC, 2 Availability Zones"]
             ALB["Load balancer + WAF<br/>(public subnet)"]
             NAT["NAT gateway<br/>(public subnet)"]
-            DAGSTER["Dagster on ECS Fargate<br/>role: etl"]
-            APISVC["FastAPI on ECS Fargate<br/>role: api"]
-            RDS[("RDS PostgreSQL")]
+            ETL["Daily load on ECS Fargate<br/>started by EventBridge Scheduler"]
+            APISVC["FastAPI on ECS Fargate<br/>2-4 copies across zones"]
+            RDS[("RDS PostgreSQL<br/>(database subnets, no internet)")]
         end
         S3B[("S3 raw bucket")]
         SM["Secrets Manager"]
-        CW["CloudWatch"]
+        CW["CloudWatch + email alerts"]
         ECR["ECR"]
     end
-    USERS["API users"] -->|HTTPS + JWT| ALB --> APISVC --> RDS
-    DAGSTER --> RDS
-    DAGSTER --> S3B
-    DAGSTER --> NAT --> PUB["Public APIs"]
-    ECR --> DAGSTER & APISVC
-    DAGSTER & APISVC -.-> SM & CW
+    USERS["API users"] --> ALB --> APISVC --> RDS
+    ETL --> RDS
+    ETL --> S3B
+    ETL --> NAT --> PUB["Public APIs"]
+    ECR --> ETL & APISVC
+    ETL & APISVC -.-> SM & CW
 ```
 
-Least privilege: the ETL role can write only to `raw/*` in the raw bucket and read its own
-database secret. The API role has no S3 access and connects as a read-only database user.
+Least privilege: the API has no AWS permissions at all and connects as a read-only database
+user. The pipeline can read and write only `raw/*` in the raw bucket. Each task can read only its
+own secrets. Every container runs as a non-root user with a read-only filesystem.
 
 ## 4. Build status
 
@@ -195,5 +199,5 @@ database secret. The API role has no S3 access and connects as a read-only datab
 | 3. Data quality | Validation, quarantine table, Dagster asset checks | Done |
 | 4. Metadata catalog | Provenance for every run, row-level lineage | Done |
 | 5. API | FastAPI + JWT roles, read-only DB sessions | Done |
-| 6. AWS | Terraform: VPC, S3, RDS, ECS, IAM | Next |
-| 7. CI/CD | GitHub Actions | Planned |
+| 6. AWS | Terraform: VPC, S3, RDS, ECS, IAM, WAF, alarms (written and tested offline; not yet deployed) | Done |
+| 7. CI/CD | GitHub Actions | Next |

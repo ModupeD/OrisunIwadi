@@ -3,6 +3,7 @@ the use case) and are quoted with sql.Identifier; values are always bound parame
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any
 
 import psycopg
@@ -61,21 +62,43 @@ class PostgresReadStore:
             "SELECT {c}, count(*) FROM {t} GROUP BY 1 ORDER BY 2 DESC, 1 LIMIT 1000"
         ).format(c=sql.Identifier(column), t=self._table(dataset))).fetchall()]
 
+    @staticmethod
+    def _where(filters: dict[str, str]) -> sql.Composable:
+        # Compare as text so one filter syntax works for every column type.
+        return sql.SQL(" AND ").join(
+            sql.SQL("{}::text = %s").format(sql.Identifier(c)) for c in filters
+        ) if filters else sql.SQL("true")
+
+    def _select(self, dataset: Dataset, filters: dict[str, str]) -> sql.Composable:
+        cols = [*dataset.column_names, *LINEAGE_COLUMNS]
+        return sql.SQL("SELECT {cols} FROM {t} WHERE {where} ORDER BY {pk}").format(
+            cols=sql.SQL(", ").join(map(sql.Identifier, cols)), t=self._table(dataset),
+            where=self._where(filters),
+            pk=sql.SQL(", ").join(map(sql.Identifier, dataset.primary_key)))
+
     def rows(self, dataset: Dataset, filters: dict[str, str], limit: int,
              offset: int) -> list[dict[str, Any]]:
         if not table_exists(self.conn, SCHEMA, dataset.name):
             return []
-        cols = [*dataset.column_names, *LINEAGE_COLUMNS]
-        where = sql.SQL(" AND ").join(
-            # Compare as text so one filter syntax works for every column type.
-            sql.SQL("{}::text = %s").format(sql.Identifier(c)) for c in filters
-        ) if filters else sql.SQL("true")
-        return self._all(sql.SQL("""
-            SELECT {cols} FROM {t} WHERE {where} ORDER BY {pk} LIMIT %s OFFSET %s
-        """).format(
-            cols=sql.SQL(", ").join(map(sql.Identifier, cols)), t=self._table(dataset),
-            where=where, pk=sql.SQL(", ").join(map(sql.Identifier, dataset.primary_key)),
-        ), [*filters.values(), limit, offset])
+        return self._all(sql.SQL("{} LIMIT %s OFFSET %s").format(
+            self._select(dataset, filters)), [*filters.values(), limit, offset])
+
+    def count_rows(self, dataset: Dataset, filters: dict[str, str]) -> int:
+        if not table_exists(self.conn, SCHEMA, dataset.name):
+            return 0
+        return self.conn.execute(sql.SQL("SELECT count(*) FROM {} WHERE {}").format(
+            self._table(dataset), self._where(filters)), list(filters.values())).fetchone()[0]
+
+    def iter_rows(self, dataset: Dataset, filters: dict[str, str],
+                  batch_size: int) -> Iterator[list[dict[str, Any]]]:
+        if not table_exists(self.conn, SCHEMA, dataset.name):
+            return
+        # A server-side cursor: Postgres keeps the result and hands it over a batch at a
+        # time, so memory stays flat and each fetch stays well under the query time limit.
+        with self.conn.cursor(name=f"export_{dataset.name}", row_factory=dict_row) as cur:
+            cur.execute(self._select(dataset, filters), list(filters.values()))
+            while batch := cur.fetchmany(batch_size):
+                yield batch
 
     def quarantine(self, dataset_name: str | None, limit: int,
                    offset: int) -> list[dict[str, Any]]:

@@ -34,10 +34,17 @@ def build_asset(source: Source,
     @dg.asset(
         name=ds.name,
         group_name="ingestion",
-        description=ds.description,
+        description=(f"**OncoLake** · {ds.description}\n\n"
+                     f"Raw snapshot to S3, validated rows to `{SCHEMA}.{ds.name}`, every run "
+                     "logged in `catalog.runs`."),
         kinds={"python", "s3", "postgres"},
-        metadata={"source_url": ds.source_url, "table": f"{SCHEMA}.{ds.name}",
-                  "primary_key": ", ".join(ds.primary_key)},
+        owners=["team:oncolake"],
+        tags={"platform": "oncolake", "domain": "cancer-research"},
+        metadata={"source_url": dg.MetadataValue.url(ds.source_url),
+                  "table": dg.MetadataValue.text(f"{SCHEMA}.{ds.name}"),
+                  "primary_key": ", ".join(ds.primary_key),
+                  "quality_rules": len(ds.all_rules),
+                  "api_docs": dg.MetadataValue.url("http://localhost:8000/docs")},
         # Also covers DatasetAlreadyRunning: wait for the other run, then try again.
         retry_policy=retry_policy,
         check_specs=[

@@ -14,6 +14,7 @@ dependencies = [
     "uvicorn[standard]>=0.54.0",
     "pyjwt>=2.15.1",
     "python-multipart>=0.0.33",
+    "pyarrow>=26.0.1",
 ]
 
 [dependency-groups]
@@ -32,6 +33,7 @@ packages = ["src/orisun_iwadi"]
 
 [tool.dagster]
 module_name = "orisun_iwadi.entrypoints.dagster.definitions"
+code_location_name = "oncolake"
 
 [tool.ruff]
 line-length = 100

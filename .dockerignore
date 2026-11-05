@@ -1,0 +1,13 @@
+.git
+.env
+.env.*
+.venv
+.docker
+.dagster_home
+.pytest_cache
+.ruff_cache
+**/__pycache__
+**/*.pyc
+infra
+tests
+docs

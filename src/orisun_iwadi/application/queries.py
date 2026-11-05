@@ -3,11 +3,15 @@ so nothing from a URL reaches SQL unless it is a known dataset or column."""
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 from ..domain.dataset import Dataset
 
 MAX_PAGE = 500
+MAX_EXPORT_ROWS = 200_000  # the largest table today is ~27k rows
+EXPORT_BATCH = 5_000  # rows read per database round trip while exporting
 
 
 class UnknownDataset(LookupError):
@@ -36,6 +40,22 @@ class ReadStore(Protocol):
                    offset: int) -> list[dict[str, Any]]: ...
 
     def runs(self, dataset_name: str | None, limit: int, offset: int) -> list[dict[str, Any]]: ...
+
+    def count_rows(self, dataset: Dataset, filters: dict[str, str]) -> int: ...
+
+    def iter_rows(self, dataset: Dataset, filters: dict[str, str],
+                  batch_size: int) -> Iterator[list[dict[str, Any]]]:
+        """All matching rows in primary-key order, a batch at a time."""
+        ...
+
+
+@dataclass(frozen=True)
+class ExportPlan:
+    """A checked export request: what to read, and how many rows it will produce."""
+
+    dataset: Dataset
+    filters: dict[str, str]
+    row_count: int
 
 
 def _page(limit: int, offset: int) -> tuple[int, int]:
@@ -111,6 +131,18 @@ class DatasetQueries:
         rows = self.store.rows(ds, filters, limit, offset)
         return {"dataset": ds.name, "filters": filters, "limit": limit, "offset": offset,
                 "count": len(rows), "rows": rows}
+
+    def plan_export(self, name: str, filters: dict[str, str]) -> ExportPlan:
+        """Check an export before any data is sent: known dataset and columns, and a size
+        cap, so a download can't run for minutes or exhaust memory."""
+        ds = self._get(name)
+        for col in filters:
+            self._check_column(ds, col)
+        n = self.store.count_rows(ds, filters)
+        if n > MAX_EXPORT_ROWS:
+            raise InvalidQuery(f"{n} rows match; exports are limited to {MAX_EXPORT_ROWS}. "
+                               "Add filters to narrow it down.")
+        return ExportPlan(dataset=ds, filters=filters, row_count=n)
 
     # --- admin --------------------------------------------------------------------------------
 

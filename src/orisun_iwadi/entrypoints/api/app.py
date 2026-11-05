@@ -1,6 +1,8 @@
 """FastAPI app: the composition root for the API. Run with `make api`.
 
 Endpoints and the lowest role that can use them:
+  GET  /                               anyone      OncoLake landing page (works without the DB)
+  GET  /docs                           anyone      branded, interactive API docs
   POST /auth/token                     anyone (username + password -> 30-minute JWT)
   GET  /health                         anyone      liveness: the process is up
   GET  /ready                          anyone      readiness: the database is reachable
@@ -8,7 +10,10 @@ Endpoints and the lowest role that can use them:
   GET  /datasets                       viewer
   GET  /datasets/{name}                viewer      summary: columns, row count, last run
   GET  /datasets/{name}/counts?by=col  viewer      grouped counts, small groups hidden
+  GET  /datasets/{name}/counts.csv    viewer      the same counts as a CSV file
   GET  /datasets/{name}/rows           researcher  row-level data; ?col=value filters
+  GET  /datasets/{name}/export.csv     researcher  whole (filtered) table as CSV, streamed
+  GET  /datasets/{name}/export.parquet researcher  whole (filtered) table as Parquet
   GET  /admin/quarantine               admin
   GET  /admin/runs                     admin
 
@@ -18,28 +23,43 @@ Failure handling: if the database is down, slow or overloaded, requests fail fas
 
 from __future__ import annotations
 
+import csv
+import io
+import itertools
+import json
 import logging
 import os
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Annotated, Any
 
 import psycopg
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.staticfiles import StaticFiles
 from psycopg_pool import ConnectionPool, PoolTimeout, TooManyRequests
 from pydantic import BaseModel
 
+from ...adapters.exports.writers import build_parquet, csv_chunks
 from ...adapters.security.passwords import ScryptHasher
 from ...adapters.security.tokens import InvalidToken, JwtTokens
 from ...adapters.sources import ALL_SOURCES
 from ...adapters.storage.postgres_read_store import PostgresReadStore
 from ...adapters.storage.user_store import PostgresUserStore
 from ...application.auth import Authenticate, StoredUser
-from ...application.queries import MAX_PAGE, DatasetQueries, InvalidQuery, UnknownDataset
+from ...application.queries import (
+    EXPORT_BATCH,
+    MAX_PAGE,
+    DatasetQueries,
+    ExportPlan,
+    InvalidQuery,
+    UnknownDataset,
+)
 from ...domain.access import Role, User
+from .branding import BRAND, STATIC_DIR, TAGLINE, docs_page, landing_page
 
 DATASETS = [s.dataset for s in ALL_SOURCES]
 PAGING = {"limit", "offset"}
@@ -55,14 +75,20 @@ POOL_MAX_WAITING = 20  # requests allowed to queue for a connection; more get 50
 class Settings:
     dsn: str | None
     jwt_secret: str
+    # Connections per API copy. Copies x pool size must stay within the orisun_api
+    # connection limit (20), so on AWS each copy gets fewer (see infra/aws).
+    pool_size: int = 10
 
     @classmethod
     def from_env(cls) -> Settings:
         secret = os.getenv("JWT_SECRET")
         if not secret:
             raise RuntimeError("JWT_SECRET is not set (see .env.example)")
+        pool_size = int(os.getenv("API_DB_POOL_SIZE", "10"))
+        if pool_size < 1:
+            raise RuntimeError("API_DB_POOL_SIZE must be at least 1")
         # The API's own read-only database user (see local/db-roles.sql).
-        return cls(dsn=os.environ["API_POSTGRES_DSN"], jwt_secret=secret)
+        return cls(dsn=os.environ["API_POSTGRES_DSN"], jwt_secret=secret, pool_size=pool_size)
 
 
 class Token(BaseModel):
@@ -110,6 +136,33 @@ def get_authenticate(request: Request) -> Authenticate:
     return request.app.state.authenticate
 
 
+Batches = Iterator[list[dict[str, Any]]]
+
+
+def get_export_reader(request: Request) -> Callable[[ExportPlan], Batches]:
+    """Exports read on their own pooled connection, held only while the file is produced
+    (a streamed CSV outlives the request's normal connection)."""
+    pool: ConnectionPool = request.app.state.pool
+
+    def read(plan: ExportPlan) -> Batches:
+        with pool.connection() as conn:
+            yield from PostgresReadStore(conn).iter_rows(plan.dataset, plan.filters,
+                                                         EXPORT_BATCH)
+    return read
+
+
+def _started(batches: Batches) -> Batches:
+    """Read the first batch now, so a database problem becomes a 503 before any bytes are
+    sent, rather than a half-finished download."""
+    first = next(batches, None)
+    return itertools.chain([first] if first is not None else [], batches)
+
+
+def _attachment(name: str, ext: str) -> dict[str, str]:
+    stamp = datetime.now(UTC).strftime("%Y%m%d")
+    return {"Content-Disposition": f'attachment; filename="{name}_{stamp}.{ext}"'}
+
+
 def current_user(token: Annotated[str, Depends(oauth2)],
                  tokens: Annotated[JwtTokens, Depends(get_tokens)]) -> User:
     try:
@@ -127,6 +180,7 @@ def require(role: Role):
     return check
 
 
+ExportReader = Annotated[Callable[[ExportPlan], Batches], Depends(get_export_reader)]
 Viewer = Annotated[User, Depends(require(Role.VIEWER))]
 Researcher = Annotated[User, Depends(require(Role.RESEARCHER))]
 Admin = Annotated[User, Depends(require(Role.ADMIN))]
@@ -144,7 +198,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if settings.dsn:
             # open=True doesn't wait for the database: the API starts even if it is down,
             # answers 503 until it is back, then recovers by itself.
-            pool = ConnectionPool(settings.dsn, min_size=1, max_size=10, configure=_read_only,
+            pool = ConnectionPool(settings.dsn, min_size=1, max_size=settings.pool_size,
+                                  configure=_read_only,
                                   kwargs={"options": SESSION_OPTIONS, "connect_timeout": 3},
                                   timeout=POOL_TIMEOUT, max_waiting=POOL_MAX_WAITING,
                                   open=True)
@@ -154,8 +209,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if pool:
             pool.close()
 
-    app = FastAPI(title="OrisunIwadi API", version="0.1.0", lifespan=lifespan,
-                  description="Role-based, read-only access to curated cancer research data.")
+    app = FastAPI(
+        title=f"{BRAND} API", version="0.1.0", lifespan=lifespan,
+        docs_url=None, redoc_url=None,  # replaced by the branded /docs below
+        description=f"**{TAGLINE}.**\n\nRole-based, read-only access to curated public "
+                    "cancer datasets. Click **Authorize** and sign in to try the endpoints.",
+    )
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+    @app.get("/", include_in_schema=False)
+    def home():
+        return landing_page(DATASETS)
+
+    @app.get("/docs", include_in_schema=False)
+    def docs():
+        return docs_page(app.openapi_url)
     app.state.tokens = JwtTokens(settings.jwt_secret)
     app.state.pool = None
 
@@ -190,8 +258,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"status": "ok"}
 
     @app.get("/ready", tags=["meta"],
-             description="200 when this copy can serve requests. The load balancer uses it "
-                         "to stop sending traffic to a copy that can't reach the database.")
+             description="200 when this copy can reach the database and serve data, "
+                         "503 when it can't. For monitoring; the load balancer checks "
+                         "/health, so a database outage doesn't restart every copy.")
     def ready(request: Request):
         pool: ConnectionPool | None = request.app.state.pool
         if pool is None:
@@ -234,6 +303,58 @@ def create_app(settings: Settings | None = None) -> FastAPI:
              limit: Limit = 100, offset: Offset = 0) -> dict[str, Any]:
         filters = {k: v for k, v in request.query_params.items() if k not in PAGING}
         return q.rows(name, filters, limit, offset)
+
+    @app.get("/datasets/{name}/counts.csv", tags=["viewer"], response_class=StreamingResponse)
+    def group_counts_csv(name: str, by: str, _: Viewer, q: Queries) -> StreamingResponse:
+        result = q.group_counts(name, by)
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow([by, "count"])
+        writer.writerows([g["value"], g["count"]] for g in result["groups"])
+        hidden = result["suppressed"]
+        return StreamingResponse(
+            iter([("\ufeff" + buf.getvalue()).encode()]), media_type="text/csv",
+            headers={**_attachment(f"{name}_counts_by_{by}", "csv"),
+                     "X-Suppressed-Groups": str(hidden["groups"]),
+                     "X-Suppressed-Rows": str(hidden["rows"])})
+
+    @app.get("/datasets/{name}/export.csv", tags=["researcher"],
+             response_class=StreamingResponse,
+             description="The whole table (or the rows matching ?column=value filters) as "
+                         "CSV, sent as it is read. Includes lineage columns.")
+    def export_csv(name: str, request: Request, user: Researcher, q: Queries,
+                   read: ExportReader) -> StreamingResponse:
+        plan = q.plan_export(name, dict(request.query_params))
+        log.info("export csv dataset=%s rows=%d filters=%s user=%s", name, plan.row_count,
+                 plan.filters, user.username)
+        return StreamingResponse(
+            csv_chunks(plan.dataset, _started(read(plan))), media_type="text/csv",
+            headers={**_attachment(name, "csv"), "X-Row-Count": str(plan.row_count)})
+
+    @app.get("/datasets/{name}/export.parquet", tags=["researcher"],
+             response_class=StreamingResponse,
+             description="The same as export.csv, as a typed, compressed Parquet file. "
+                         "Provenance (dataset, source, filters, time) is in the file metadata.")
+    def export_parquet(name: str, request: Request, user: Researcher, q: Queries,
+                       read: ExportReader) -> StreamingResponse:
+        plan = q.plan_export(name, dict(request.query_params))
+        log.info("export parquet dataset=%s rows=%d filters=%s user=%s", name,
+                 plan.row_count, plan.filters, user.username)
+        # Built completely before sending: any failure is a clean error, never a broken file.
+        f = build_parquet(plan.dataset, read(plan), metadata={
+            "dataset": name, "source_url": plan.dataset.source_url,
+            "primary_key": ",".join(plan.dataset.primary_key),
+            "filters": json.dumps(plan.filters), "row_count": plan.row_count,
+            "exported_at": datetime.now(UTC).isoformat(), "exported_by": user.username,
+        })
+
+        def chunks() -> Iterator[bytes]:
+            with f:
+                while chunk := f.read(1024 * 1024):
+                    yield chunk
+        return StreamingResponse(
+            chunks(), media_type="application/vnd.apache.parquet",
+            headers={**_attachment(name, "parquet"), "X-Row-Count": str(plan.row_count)})
 
     @app.get("/admin/quarantine", tags=["admin"])
     def quarantine(_: Admin, q: Queries, dataset: str | None = None,

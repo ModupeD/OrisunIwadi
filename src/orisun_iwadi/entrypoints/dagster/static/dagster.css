@@ -1,0 +1,49 @@
+/* OncoLake logo in the Dagster UI's side navigation (added by ui_branding.py).
+ *
+ * Dagster draws its logo as an inline SVG labelled "Dagster". We hide it and draw the OncoLake
+ * mark and name in its place. Colours use Dagster's own theme variables, so the name stays
+ * readable in light and dark themes. If Dagster changes this markup, these rules match nothing
+ * and the stock logo shows: nothing breaks.
+ */
+
+/* Don't set display on the logo boxes themselves: Dagster uses it to show the full logo or the
+   small one depending on whether the navigation is collapsed. */
+nav a svg[aria-label="Dagster"] {
+  display: none !important;
+}
+
+/* Expanded navigation: mark + "Onco" ... */
+nav a div:has(> svg[aria-label="Dagster"][viewBox="0 0 223 48"])::before {
+  content: "Onco";
+  padding-left: 36px;
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+  background: url("mark.svg") left center / 28px 28px no-repeat;
+  color: var(--color-text-default);
+  font: 700 19px/1 Inter, "Segoe UI", Helvetica, Arial, sans-serif;
+  letter-spacing: -0.3px;
+}
+
+/* ... + "Lake" in OncoLake teal (readable on light and dark backgrounds). */
+nav a div:has(> svg[aria-label="Dagster"][viewBox="0 0 223 48"])::after {
+  content: "Lake";
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  vertical-align: middle;
+  color: #0d9488;
+  font: 700 19px/1 Inter, "Segoe UI", Helvetica, Arial, sans-serif;
+  letter-spacing: -0.3px;
+}
+
+/* Collapsed navigation: the mark only. */
+nav a div:has(> svg[aria-label="Dagster"][viewBox="0 0 48 48"])::before {
+  content: "";
+  display: inline-block;
+  vertical-align: middle;
+  width: 28px;
+  height: 28px;
+  background: url("mark.svg") center / contain no-repeat;
+}

@@ -7,3 +7,9 @@ __pycache__/
 .dagster_home/
 *.egg-info/
 .docker/
+# Terraform: providers, local state and your own settings (commit .terraform.lock.hcl)
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+infra/aws/terraform.tfvars

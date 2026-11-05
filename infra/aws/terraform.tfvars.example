@@ -1,0 +1,17 @@
+# Copy to terraform.tfvars (gitignored) and fill in. image_tag is set by make aws-apply.
+
+alert_email = "you@example.com"
+
+# Cheaper single-zone database and NAT (default), or survive a whole zone failing (+~$45/month).
+high_availability = false
+
+# Narrow to your own IP while testing, e.g. ["203.0.113.7/32"].
+allowed_cidrs = ["0.0.0.0/0"]
+
+# Set to an ACM certificate ARN for your domain to serve HTTPS.
+certificate_arn = ""
+
+monthly_budget_usd = 120
+
+# Turn off (and make aws-apply) before make aws-destroy.
+deletion_protection = true

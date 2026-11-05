@@ -13,6 +13,9 @@ SELECT format('CREATE ROLE orisun_api LOGIN PASSWORD %L', :'api_password')
 WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'orisun_api') \gexec
 ALTER ROLE orisun_etl PASSWORD :'etl_password';
 ALTER ROLE orisun_api PASSWORD :'api_password';
+-- On RDS the admin is not a superuser: it must be a member of orisun_etl to hand schemas to it
+-- and to set its default privileges below. (Locally the admin is a superuser; this is a no-op.)
+GRANT orisun_etl TO CURRENT_USER;
 
 -- Bulkheads: each side has its own connection budget, so one can't starve the other.
 ALTER ROLE orisun_etl CONNECTION LIMIT 20;

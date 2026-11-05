@@ -124,11 +124,45 @@ curl -H "Authorization: Bearer $TOKEN" "localhost:8000/datasets/gdc_tcga_cases/r
 | Role | Can use |
 |---|---|
 | `viewer` | `/datasets`, `/datasets/{name}`, `/datasets/{name}/counts?by=column` |
-| `researcher` | + `/datasets/{name}/rows` (row-level data; `?column=value` filters) |
+| `researcher` | + `/datasets/{name}/rows` (row-level data; `?column=value` filters) and full exports |
 | `admin` | + `/admin/quarantine`, `/admin/runs` |
+
+### Exporting data
+
+```bash
+# Whole table, or only the rows you filter for. Opens in Excel, R, pandas.
+curl -H "Authorization: Bearer $TOKEN" -OJ "localhost:8000/datasets/gdc_tcga_cases/export.csv?primary_site=Breast"
+# Same data as Parquet: typed columns, ~10x smaller, provenance in the file metadata.
+curl -H "Authorization: Bearer $TOKEN" -OJ "localhost:8000/datasets/gdc_tcga_cases/export.parquet"
+# Viewers can download grouped counts (small groups hidden).
+curl -H "Authorization: Bearer $TOKEN" -OJ "localhost:8000/datasets/gdc_tcga_cases/counts.csv?by=primary_site"
+```
+
+```python
+import pandas as pd
+df = pd.read_parquet("gdc_tcga_cases_20261105.parquet")
+```
+
+Exports include the lineage columns (`_run_id`, `_raw_s3_uri`, …), are capped at 200,000
+rows (add filters for more), and never arrive as a silently broken file: Parquet is built
+fully before sending (any failure is a 503), and a CSV that fails mid-download is cut off so
+the client reports it as incomplete.
 
 Grouped counts hide groups with fewer than 10 rows (small-cell suppression). The API's
 database sessions are read-only. Full list and try-it-out at http://localhost:8000/docs.
+
+## AWS
+
+The same image runs on AWS: the API on ECS Fargate (2+ copies in two Availability Zones,
+behind a load balancer and WAF), the daily load as a scheduled task that exits when done, and
+PostgreSQL on RDS in subnets with no internet route. Every part has its own minimal IAM role;
+the API has none at all. Details, cost and deploy steps: [docs/aws.md](docs/aws.md).
+
+```bash
+make tf-check          # validate + offline tests of the Terraform (AWS mocked, no account)
+make image             # build the container image locally
+make aws-push aws-apply aws-db-roles   # deploy (needs an AWS account; costs money)
+```
 
 ## Project layout
 
@@ -141,11 +175,16 @@ src/orisun_iwadi/
 │   ├── security/      passwords.py (scrypt), tokens.py (JWT)
 │   └── storage/       S3 raw store, curated/quarantine/catalog/user/read stores, locks
 └── entrypoints/
-    ├── dagster/       assets.py, resources.py, definitions.py
+    ├── dagster/       assets.py, resources.py, definitions.py, run_job.py (no-UI runner)
     └── api/           app.py (FastAPI), users.py (user admin CLI)
+infra/
+├── bootstrap/         Terraform state bucket + image registry (applied once)
+├── aws/               VPC, RDS, S3, ECS, IAM, WAF, alarms; tests/ runs offline
+└── scripts/           run one-off tasks and add API users on AWS
 tests/
 ├── unit/              no services needed
 └── integration/       needs `make up`
+Dockerfile             one image for the API, the pipeline and admin tasks
 ```
 
 ## Roadmap
@@ -155,5 +194,5 @@ tests/
 3. ~~Data-quality checks and a quarantine table~~ ✅
 4. ~~Metadata catalog for provenance~~ ✅
 5. ~~Role-based FastAPI API~~ ✅
-6. AWS with Terraform and least-privilege IAM
+6. ~~AWS with Terraform and least-privilege IAM~~ ✅ ([docs/aws.md](docs/aws.md))
 7. CI/CD with GitHub Actions

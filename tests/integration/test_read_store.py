@@ -55,3 +55,24 @@ def test_filters_paging_and_counts_on_real_tables(conn):
         conn.rollback()
         conn.execute(f'DROP TABLE IF EXISTS {SCHEMA}."{name}"')
         conn.commit()
+
+
+def test_export_reads_everything_in_batches_and_counts_match(conn):
+    name = f"test_{uuid.uuid4().hex[:8]}"
+    ds = Dataset(name=name, description="", source_url="",
+                 columns=(("id", "integer"), ("site", "text")), primary_key=("id",))
+    rows = [{"id": i, "site": "Breast" if i % 2 else "Lung"} for i in range(1234)]
+    try:
+        PostgresCuratedStore(conn).upsert(ds, prepare_rows(ds, rows).rows, "mem://x", "run-1")
+        store = PostgresReadStore(conn)
+        batches = list(store.iter_rows(ds, {"site": "Breast"}, batch_size=100))
+        assert [len(b) for b in batches] == [100] * 6 + [17]  # 617 rows, never all at once
+        ids = [r["id"] for b in batches for r in b]
+        assert ids == sorted(ids)  # stable order: primary key
+        assert store.count_rows(ds, {"site": "Breast"}) == len(ids) == 617
+        plan = DatasetQueries([ds], store).plan_export(name, {"site": "Breast"})
+        assert plan.row_count == 617
+    finally:
+        conn.rollback()
+        conn.execute(f'DROP TABLE IF EXISTS {SCHEMA}."{name}"')
+        conn.commit()

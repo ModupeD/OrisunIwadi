@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="OncoLake">
+  <defs>
+    <linearGradient id="ol-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0E7490"/>
+      <stop offset="1" stop-color="#0F766E"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="15" fill="url(#ol-bg)"/>
+  <!-- a data point rising from the lake -->
+  <circle cx="32" cy="19" r="6" fill="#F59E0B"/>
+  <!-- three layers of the lake: raw, curated, served -->
+  <path d="M10 34c5.5-4 10.5-4 16 0s10.5 4 16 0 9-4 12-2" fill="none" stroke="#CCFBF1"
+        stroke-width="4" stroke-linecap="round"/>
+  <path d="M10 43c5.5-4 10.5-4 16 0s10.5 4 16 0 9-4 12-2" fill="none" stroke="#5EEAD4"
+        stroke-width="4" stroke-linecap="round"/>
+  <path d="M10 52c5.5-4 10.5-4 16 0s10.5 4 16 0 9-4 12-2" fill="none" stroke="#2DD4BF"
+        stroke-width="4" stroke-linecap="round"/>
+</svg>
