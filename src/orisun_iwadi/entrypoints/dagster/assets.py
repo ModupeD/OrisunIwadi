@@ -3,11 +3,14 @@
 import dagster as dg
 
 from ...adapters.sources import ALL_SOURCES
+from ...adapters.storage.catalog_store import PostgresCatalogStore
+from ...adapters.storage.postgres_lock import PostgresRunLock
 from ...adapters.storage.postgres_store import SCHEMA, PostgresCuratedStore
 from ...adapters.storage.quarantine_store import PostgresQuarantineStore
 from ...adapters.storage.s3_raw_store import S3RawSnapshotStore
-from ...application.ingest_dataset import IngestDataset
+from ...application.ingest_dataset import IngestDataset, RunInfo
 from ...application.ports import Source
+from ..version import code_version
 from .resources import PostgresResource, S3Resource
 
 # Warn when more than this share of a run's records fail a quality rule.
@@ -28,6 +31,7 @@ def build_asset(source: Source) -> dg.AssetsDefinition:
         kinds={"python", "s3", "postgres"},
         metadata={"source_url": ds.source_url, "table": f"{SCHEMA}.{ds.name}",
                   "primary_key": ", ".join(ds.primary_key)},
+        # Also covers DatasetAlreadyRunning: wait for the other run, then try again.
         retry_policy=dg.RetryPolicy(max_retries=2, delay=30),
         check_specs=[
             dg.AssetCheckSpec("quarantine_rate_ok", asset=ds.name,
@@ -44,14 +48,18 @@ def build_asset(source: Source) -> dg.AssetsDefinition:
                 raw_store=S3RawSnapshotStore(s3.client(), s3.bucket),
                 curated_store=PostgresCuratedStore(conn),
                 quarantine_store=PostgresQuarantineStore(conn),
+                catalog=PostgresCatalogStore(conn),
+                lock=PostgresRunLock(conn),
                 log=context.log.info,
             )
-            result = ingest(source, max_records=config.max_records)
+            run = RunInfo(run_id=context.run_id, code_version=code_version())
+            result = ingest(source, max_records=config.max_records, run=run)
             table_rows = conn.execute(
                 f'SELECT count(*) FROM {SCHEMA}."{ds.name}"').fetchone()[0]
 
         return dg.MaterializeResult(
-            metadata={**result.as_dict(), "table_rows": table_rows},
+            metadata={**result.as_dict(), "table_rows": table_rows,
+                      "code_version": run.code_version},
             check_results=[
                 dg.AssetCheckResult(
                     check_name="quarantine_rate_ok",

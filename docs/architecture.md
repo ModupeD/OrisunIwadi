@@ -69,15 +69,38 @@ flowchart LR
     SNAP -->|"put if new"| S3[("S3 raw zone (bronze)<br/>SeaweedFS locally")]
     UPSERT --> PG[("PostgreSQL (silver)<br/>schema oncology")]
     DQ -->|failed rows + reasons| QUAR[("quality.quarantine")]
-    UPSERT --> CAT[("metadata catalog")]
+    UPSERT -->|"every run"| CAT[("catalog.runs<br/>catalog.datasets")]
     PG --> APIS["FastAPI, role-based"]
 
     classDef planned stroke-dasharray: 5 5
-    class CAT,APIS planned
+    class APIS planned
 ```
 
 Every curated row stores `_record_hash`, `_raw_s3_uri` (the raw file it came from),
-`_first_seen_at` and `_last_updated_at`.
+`_run_id` (the run that last inserted or changed it), `_first_seen_at` and `_last_updated_at`.
+
+### Metadata catalog (provenance)
+
+| Table | One row per | Holds |
+|---|---|---|
+| `catalog.datasets` | dataset | description, source URL, columns, primary key, quality rules |
+| `catalog.runs` | run × dataset | status, start/end time, code version (git commit), source URL, raw file sha256 + S3 URI, row counts, error if it failed |
+
+Failed runs are logged too, with the error. A Dagster retry of the same run replaces its row.
+Code version is `GIT_SHA` on AWS (set by CI) or the local commit, with `-dirty` when there
+are uncommitted changes.
+
+Tracing a row back to its source: row `_run_id` → `catalog.runs` → `raw_s3_uri` (the exact
+raw file) and `code_version` (the exact code that loaded it).
+
+### Concurrency
+
+| Risk | Guard |
+|---|---|
+| Two runs load the same dataset at once (e.g. schedule + manual) and an older fetch overwrites newer data | Per-dataset Postgres advisory lock, held from fetch to commit. A second run gets `DatasetAlreadyRunning`; Dagster retries it after 30 s. Postgres frees the lock if the process dies. |
+| Two runs create the same table at once on a fresh database | Table setup runs under one app-wide advisory lock |
+| Table setup blocking readers during a load (`ALTER TABLE` and `CREATE INDEX` lock even when there is nothing to do) | DDL runs only when a table or column is actually missing, and commits right away |
+| A step fails half-way | Each store writes in one transaction; a retry re-runs safely because every write is idempotent |
 
 ### Data quality
 
@@ -130,7 +153,7 @@ database secret. The API role has no S3 access and connects as a read-only datab
 | 1. Local setup | uv, Docker Compose (Postgres + SeaweedFS), Dagster | Done |
 | 2. ETL | 5 datasets → S3 + Postgres, idempotent, clean architecture | Done |
 | 3. Data quality | Validation, quarantine table, Dagster asset checks | Done |
-| 4. Metadata catalog | Provenance for every run | Next |
-| 5. API | FastAPI + JWT roles | Planned |
+| 4. Metadata catalog | Provenance for every run, row-level lineage | Done |
+| 5. API | FastAPI + JWT roles | Next |
 | 6. AWS | Terraform: VPC, S3, RDS, ECS, IAM | Planned |
 | 7. CI/CD | GitHub Actions | Planned |

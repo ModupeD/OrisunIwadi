@@ -13,6 +13,7 @@ from psycopg.types.json import Jsonb
 
 from ...domain.dataset import Dataset
 from ...domain.records import QuarantinedRow
+from .ddl import run_ddl, table_exists
 
 SCHEMA = "quality"
 TABLE = "quarantine"
@@ -26,6 +27,7 @@ def _jsonb(obj) -> Jsonb:
 class PostgresQuarantineStore:
     def __init__(self, conn: psycopg.Connection, schema: str = SCHEMA) -> None:
         self.conn = conn
+        self.schema_name = schema
         self.table = sql.Identifier(schema, TABLE)
         self.schema = sql.Identifier(schema)
 
@@ -51,8 +53,9 @@ class PostgresQuarantineStore:
             raise
 
     def _ensure_table(self) -> None:
-        self.conn.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(self.schema))
-        self.conn.execute(sql.SQL("""
+        if table_exists(self.conn, self.schema_name, TABLE):
+            return
+        run_ddl(self.conn, [sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(self.schema), sql.SQL("""
             CREATE TABLE IF NOT EXISTS {} (
                 dataset        text        NOT NULL,
                 record_hash    text        NOT NULL,
@@ -63,4 +66,4 @@ class PostgresQuarantineStore:
                 quarantined_at timestamptz NOT NULL DEFAULT now(),
                 PRIMARY KEY (dataset, record_hash)
             )
-        """).format(self.table))
+        """).format(self.table)])

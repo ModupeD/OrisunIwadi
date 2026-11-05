@@ -66,6 +66,22 @@ Dagster shows two checks per dataset: `quarantine_rate_ok` (warns above 5%) and
 SELECT dataset, reasons, row_data FROM quality.quarantine ORDER BY quarantined_at DESC;
 ```
 
+## Provenance
+
+Every run of every dataset is logged in `catalog.runs`: status, timings, the git commit of the
+code, the raw file's sha256 and S3 location, and row counts. Failed runs are logged with their
+error. `catalog.datasets` holds each dataset's source, columns, key and rules.
+
+Each curated row has a `_run_id`, so any row can be traced to the run, raw file and code
+version that produced it:
+
+```sql
+SELECT r.started_at, r.code_version, r.raw_s3_uri
+FROM oncology.civic_evidence e JOIN catalog.runs r
+  ON r.run_id = e._run_id AND r.dataset = 'civic_evidence'
+WHERE e.evidence_id = 1;
+```
+
 ## Run it locally
 
 You need [uv](https://docs.astral.sh/uv/), Docker (Colima works), and docker-compose.
@@ -86,10 +102,10 @@ For a quick run, set `max_records: 200` in the Dagster launchpad config.
 ```
 src/orisun_iwadi/
 ├── domain/            dataset.py, records.py, quality.py   pure rules, no I/O
-├── application/       ports.py, ingest_dataset.py    use cases + interfaces
+├── application/       ports.py, ingest_dataset.py, provenance.py   use cases + interfaces
 ├── adapters/
 │   ├── sources/       gdc, cbioportal, clinicaltrials, cdc, civic, http
-│   └── storage/       s3_raw_store.py, postgres_store.py, quarantine_store.py
+│   └── storage/       s3_raw_store.py, postgres_store.py, quarantine_store.py, catalog_store.py
 └── entrypoints/
     └── dagster/       assets.py, resources.py, definitions.py
 tests/
@@ -102,7 +118,7 @@ tests/
 1. ~~Local setup~~ ✅
 2. ~~Idempotent ETL for 5 datasets~~ ✅
 3. ~~Data-quality checks and a quarantine table~~ ✅
-4. Metadata catalog for provenance
+4. ~~Metadata catalog for provenance~~ ✅
 5. Role-based FastAPI API (`entrypoints/api/`)
 6. AWS with Terraform and least-privilege IAM
 7. CI/CD with GitHub Actions

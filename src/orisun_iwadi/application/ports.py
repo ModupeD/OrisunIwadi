@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from contextlib import AbstractContextManager
 from typing import Any, NamedTuple, Protocol
 
 from ..domain.dataset import Dataset
 from ..domain.records import QuarantinedRow
+from .provenance import RunRecord
 
 
 class Source(Protocol):
@@ -39,8 +41,12 @@ class UpsertCounts(NamedTuple):
 class CuratedStore(Protocol):
     """Typed, queryable tables (the silver zone)."""
 
-    def upsert(self, dataset: Dataset, rows: list[dict[str, Any]], raw_uri: str) -> UpsertCounts:
-        """Insert new rows, update changed rows, leave unchanged rows alone. Atomic."""
+    def upsert(self, dataset: Dataset, rows: list[dict[str, Any]], raw_uri: str,
+               run_id: str) -> UpsertCounts:
+        """Insert new rows, update changed rows, leave unchanged rows alone. Atomic.
+
+        Inserted and updated rows are stamped with raw_uri and run_id (row-level lineage).
+        """
         ...
 
 
@@ -49,4 +55,28 @@ class QuarantineStore(Protocol):
 
     def put(self, dataset: Dataset, rows: list[QuarantinedRow], raw_uri: str) -> int:
         """Record failed rows. A row already recorded is not added again. Returns new rows."""
+        ...
+
+
+class CatalogStore(Protocol):
+    """The metadata catalog: which datasets exist, and a log of every run (provenance)."""
+
+    def register_dataset(self, dataset: Dataset) -> None:
+        """Record the dataset's definition (source, columns, key, rules). Idempotent."""
+        ...
+
+    def record_run(self, record: RunRecord) -> None:
+        """Log one dataset run. Writing the same run again replaces it (e.g. on retry)."""
+        ...
+
+
+class DatasetAlreadyRunning(Exception):
+    """Another run is already loading this dataset."""
+
+
+class RunLock(Protocol):
+    """Makes sure only one run loads a given dataset at a time."""
+
+    def hold(self, dataset_name: str) -> AbstractContextManager[None]:
+        """Hold the dataset's lock for the with-block. Raises DatasetAlreadyRunning if taken."""
         ...
