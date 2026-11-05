@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from contextlib import AbstractContextManager
 from typing import Any, NamedTuple, Protocol
 
@@ -41,11 +41,17 @@ class UpsertCounts(NamedTuple):
 class CuratedStore(Protocol):
     """Typed, queryable tables (the silver zone)."""
 
+    def existing_rows(self, dataset: Dataset) -> int:
+        """How many rows the dataset's table has now (0 if it doesn't exist yet)."""
+        ...
+
     def upsert(self, dataset: Dataset, rows: list[dict[str, Any]], raw_uri: str,
-               run_id: str) -> UpsertCounts:
+               run_id: str,
+               approve: Callable[[UpsertCounts, int], None] | None = None) -> UpsertCounts:
         """Insert new rows, update changed rows, leave unchanged rows alone. Atomic.
 
         Inserted and updated rows are stamped with raw_uri and run_id (row-level lineage).
+        Before committing, calls approve(counts, rows_before); if it raises, nothing is saved.
         """
         ...
 

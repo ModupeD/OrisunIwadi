@@ -15,6 +15,7 @@ defs = dg.Definitions(
     resources={
         "s3": S3Resource(bucket=dg.EnvVar("S3_BUCKET"),
                          endpoint_url=os.getenv("S3_ENDPOINT_URL")),  # unset on AWS
-        "postgres": PostgresResource(dsn=dg.EnvVar("POSTGRES_DSN")),
+        # The pipeline's own least-privilege database user (see local/db-roles.sql).
+        "postgres": PostgresResource(dsn=dg.EnvVar("ETL_POSTGRES_DSN")),
     },
 )

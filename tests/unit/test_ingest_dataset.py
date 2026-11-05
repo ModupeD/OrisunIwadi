@@ -8,6 +8,7 @@ from orisun_iwadi.adapters.sources.base import ApiSource
 from orisun_iwadi.application.ingest_dataset import DatasetAlreadyRunning, IngestDataset, RunInfo
 from orisun_iwadi.application.ports import UpsertCounts
 from orisun_iwadi.domain.dataset import Dataset
+from orisun_iwadi.domain.guards import NO_LIMITS, LoadRejected
 
 
 class FakeRawStore:
@@ -30,9 +31,12 @@ class FakeCuratedStore:
     def __init__(self):
         self.tables = {}
 
-    def upsert(self, dataset, rows, raw_uri, run_id):
+    def existing_rows(self, dataset):
+        return len(self.tables.get(dataset.name, {}))
+
+    def upsert(self, dataset, rows, raw_uri, run_id, approve=None):
         table = self.tables.setdefault(dataset.name, {})
-        inserted = updated = 0
+        changes, inserted, updated = {}, 0, 0
         for row in rows:
             key = tuple(row[k] for k in dataset.primary_key)
             if key not in table:
@@ -41,8 +45,12 @@ class FakeCuratedStore:
                 updated += 1
             else:
                 continue
-            table[key] = {**row, "_run_id": run_id}
-        return UpsertCounts(inserted, updated)
+            changes[key] = {**row, "_run_id": run_id}
+        counts = UpsertCounts(inserted, updated)
+        if approve:
+            approve(counts, len(table))  # raising here means nothing is applied
+        table.update(changes)
+        return counts
 
 
 class FakeQuarantineStore:
@@ -117,12 +125,14 @@ def test_rerun_is_idempotent_and_detects_changes():
 def test_bad_rows_are_quarantined_once_and_good_rows_still_load():
     quarantine = FakeQuarantineStore()
     ingest = make_ingest(quarantine=quarantine)
-    records = [{"id": 1, "v": "a"}, {"id": 1, "v": "b"}, {"v": "no id"}, {"id": "x", "v": "c"}]
+    good = [{"id": i, "v": f"row{i}"} for i in range(2, 12)]
+    records = [{"id": 1, "v": "a"}, {"id": 1, "v": "b"}, {"v": "no id"}, {"id": "x", "v": "c"},
+               *good]
 
     first = ingest(source(records))
     assert (first.records_fetched, first.rows_quarantined, first.rows_quarantined_new,
-            first.rows_duplicate, first.rows_loaded) == (4, 2, 2, 1, 1)
-    assert first.quarantine_rate == 0.5
+            first.rows_duplicate, first.rows_loaded) == (14, 2, 2, 1, 11)
+    assert first.quarantine_rate == 2 / 14
 
     again = ingest(source(records))
     assert (again.rows_quarantined, again.rows_quarantined_new) == (2, 0)
@@ -189,3 +199,50 @@ def test_lock_is_released_when_a_run_fails():
     with pytest.raises(ConnectionError):
         make_ingest(lock=lock)(ApiSource(dataset=DS, fetch=broken, to_row=dict))
     assert lock.held == set()
+
+
+# --- safety brake ------------------------------------------------------------------------------
+
+def load(ingest, records, **kw):
+    return ingest(source(records), **kw)
+
+
+def test_run_with_too_many_bad_rows_is_rejected_and_loads_nothing():
+    catalog, curated = FakeCatalog(), FakeCuratedStore()
+    ingest = make_ingest(curated=curated, catalog=catalog)
+    records = [{"id": "broken", "v": i} for i in range(5)] + [{"id": 1, "v": "ok"}]
+
+    with pytest.raises(LoadRejected, match="83% of records failed"):
+        load(ingest, records, run=RunInfo(run_id="r1"))
+    assert curated.tables.get("demo", {}) == {}
+    assert catalog.runs[("r1", "demo")].status == "failed"
+
+
+def test_run_that_would_change_most_existing_rows_is_rejected_and_old_data_kept():
+    curated = FakeCuratedStore()
+    ingest = make_ingest(curated=curated)
+    load(ingest, [{"id": i, "v": "good"} for i in range(200)])
+
+    # A buggy transform: every row "changes" to the same wrong value.
+    with pytest.raises(LoadRejected, match="200 of 200 existing rows"):
+        load(ingest, [{"id": i, "v": "WRONG"} for i in range(200)])
+    assert {r["v"] for r in curated.tables["demo"].values()} == {"good"}
+
+    # A small, normal change still loads.
+    assert load(ingest, [{"id": i, "v": "good" if i else "fixed"} for i in range(200)]
+                ).rows_updated == 1
+
+
+def test_empty_source_does_not_count_as_success_when_data_exists():
+    ingest = make_ingest()
+    load(ingest, [{"id": 1, "v": "a"}])
+    with pytest.raises(LoadRejected, match="0 records"):
+        load(ingest, [])
+
+
+def test_expected_large_change_can_be_loaded_with_no_limits():
+    curated = FakeCuratedStore()
+    ingest = make_ingest(curated=curated)
+    load(ingest, [{"id": i, "v": "v1"} for i in range(200)])
+    assert load(ingest, [{"id": i, "v": "v2"} for i in range(200)],
+                limits=NO_LIMITS).rows_updated == 200

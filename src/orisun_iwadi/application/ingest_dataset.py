@@ -3,6 +3,7 @@
 Rows that fail a quality rule go to the quarantine store with their reasons; the rest load.
 Every run, successful or failed, is written to the metadata catalog.
 Only one run loads a given dataset at a time; a second one stops with DatasetAlreadyRunning.
+A run that looks wrong (see domain/guards.py) is rejected with LoadRejected and saves no rows.
 
 Idempotency:
   * The raw file's key is the sha256 of its canonical content, so an identical snapshot
@@ -16,6 +17,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import UTC, datetime
 
+from ..domain.guards import LoadLimits, LoadRejected
 from ..domain.records import prepare_rows, raw_object_key, sha256, snapshot_bytes
 from .ports import (
     CatalogStore,
@@ -28,7 +30,8 @@ from .ports import (
 )
 from .provenance import IngestResult, RunInfo, RunRecord
 
-__all__ = ["DatasetAlreadyRunning", "IngestDataset", "IngestResult", "RunInfo"]
+__all__ = ["DatasetAlreadyRunning", "IngestDataset", "IngestResult", "LoadLimits",
+           "LoadRejected", "RunInfo"]
 
 
 def _utcnow() -> datetime:
@@ -49,13 +52,15 @@ class IngestDataset:
         self.clock = clock
 
     def __call__(self, source: Source, max_records: int | None = None,
-                 run: RunInfo | None = None) -> IngestResult:
+                 run: RunInfo | None = None,
+                 limits: LoadLimits | None = None) -> IngestResult:
         # Held from fetch to commit: otherwise a slower run that fetched earlier could
         # commit last and overwrite newer data.
         with self.lock.hold(source.dataset.name):
-            return self._run(source, max_records, run or RunInfo())
+            return self._run(source, max_records, run or RunInfo(), limits or LoadLimits())
 
-    def _run(self, source: Source, max_records: int | None, run: RunInfo) -> IngestResult:
+    def _run(self, source: Source, max_records: int | None, run: RunInfo,
+             limits: LoadLimits) -> IngestResult:
         dataset = source.dataset
         started = self.clock()
         self.catalog.register_dataset(dataset)
@@ -68,14 +73,15 @@ class IngestDataset:
                 max_records=max_records, result=result, error=error))
 
         try:
-            result = self._ingest(source, max_records, run)
+            result = self._ingest(source, max_records, run, limits)
         except Exception as e:
             record("failed", error=f"{type(e).__name__}: {e}"[:2000])
             raise
         record("success", result=result)
         return result
 
-    def _ingest(self, source: Source, max_records: int | None, run: RunInfo) -> IngestResult:
+    def _ingest(self, source: Source, max_records: int | None, run: RunInfo,
+                limits: LoadLimits) -> IngestResult:
         dataset = source.dataset
         records = list(source.fetch(max_records))
         self.log(f"{dataset.name}: fetched {len(records)} records")
@@ -95,7 +101,13 @@ class IngestDataset:
         if prepared.quarantined:
             self.log(f"{dataset.name}: {len(prepared.quarantined)} rows quarantined "
                      f"({new_bad} new)")
-        counts = self.curated_store.upsert(dataset, prepared.rows, raw_uri, run.run_id)
+
+        # Safety brake: refuse runs that look like a bug or an outage (nothing is saved).
+        limits.check_quality(len(records), len(prepared.quarantined),
+                             self.curated_store.existing_rows(dataset))
+        counts = self.curated_store.upsert(
+            dataset, prepared.rows, raw_uri, run.run_id,
+            approve=lambda c, before: limits.check_changes(before, c.updated))
 
         result = IngestResult(
             dataset=dataset.name,

@@ -12,8 +12,8 @@ import pytest
 
 PKG = pathlib.Path(__file__).parents[2] / "src" / "orisun_iwadi"
 LAYERS = ["domain", "application", "adapters", "entrypoints"]  # inner -> outer
-FRAMEWORKS = {"dagster", "boto3", "botocore", "psycopg", "requests", "urllib3", "fastapi",
-              "sqlalchemy"}
+FRAMEWORKS = {"dagster", "boto3", "botocore", "psycopg", "psycopg_pool", "requests", "urllib3",
+              "fastapi", "starlette", "pydantic", "jwt", "sqlalchemy"}
 
 
 def imports_of(path: pathlib.Path) -> set[str]:

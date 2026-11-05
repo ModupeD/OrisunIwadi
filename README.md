@@ -24,7 +24,7 @@ this rule.
 
 ```mermaid
 flowchart LR
-    E["entrypoints<br/>Dagster assets, schedules<br/>(FastAPI later)"] --> A["adapters<br/>sources: GDC, cBioPortal, …<br/>storage: S3, PostgreSQL"]
+    E["entrypoints<br/>Dagster assets, schedules<br/>FastAPI app"] --> A["adapters<br/>sources: GDC, cBioPortal, …<br/>storage: S3, PostgreSQL"]
     A --> P["application<br/>IngestDataset use case<br/>ports: Source, RawSnapshotStore, CuratedStore"]
     P --> D["domain<br/>Dataset entity<br/>hashing, de-dupe rules"]
     E --> P
@@ -35,7 +35,7 @@ flowchart LR
 | Domain | `domain/` | nothing else | `Dataset`, `prepare_rows()`, `raw_object_key()` |
 | Application | `application/` | domain | `IngestDataset`, port interfaces |
 | Adapters | `adapters/` | application, domain | `S3RawSnapshotStore`, `PostgresCuratedStore`, `sources/gdc.py` |
-| Entrypoints | `entrypoints/` | everything | Dagster assets wire adapters into the use case |
+| Entrypoints | `entrypoints/` | everything | Dagster assets and FastAPI routes wire adapters into use cases |
 
 What this buys:
 - The use case is tested with in-memory fakes, with no Docker or network: [tests/unit/test_ingest_dataset.py](tests/unit/test_ingest_dataset.py).
@@ -93,21 +93,56 @@ make up        # start Postgres (port 5433) + SeaweedFS S3 (port 8333)
 make test      # unit + integration tests
 make dev       # Dagster UI at http://localhost:3000, then materialize "ingest_all"
 make psql      # SQL shell, e.g.  SELECT count(*) FROM oncology.gdc_tcga_cases;
+make user NAME=alice ROLE=researcher   # create an API user (asks for a password)
+make api       # API at http://localhost:8000, interactive docs at /docs
 ```
 
 For a quick run, set `max_records: 200` in the Dagster launchpad config.
+
+## Fault tolerance
+
+A failure in one part stays in that part:
+- One broken source fails only its own dataset; the rest load.
+- A run that looks wrong (too many bad rows, most rows changing, empty source) is rolled back
+  by a safety brake, so good data is never overwritten by a bug.
+- If the database goes down, the API answers 503 quickly instead of hanging, and recovers by
+  itself when the database is back.
+- The pipeline and the API use separate database users with their own permissions,
+  connection limits and timeouts.
+
+Details and the test for each failure: [docs/architecture.md](docs/architecture.md#fault-tolerance).
+
+## API
+
+Read-only, role-based access to the curated data. Log in for a 30-minute token:
+
+```bash
+TOKEN=$(curl -s -X POST localhost:8000/auth/token -d "username=alice&password=..." | jq -r .access_token)
+curl -H "Authorization: Bearer $TOKEN" "localhost:8000/datasets/gdc_tcga_cases/rows?primary_site=Breast&limit=10"
+```
+
+| Role | Can use |
+|---|---|
+| `viewer` | `/datasets`, `/datasets/{name}`, `/datasets/{name}/counts?by=column` |
+| `researcher` | + `/datasets/{name}/rows` (row-level data; `?column=value` filters) |
+| `admin` | + `/admin/quarantine`, `/admin/runs` |
+
+Grouped counts hide groups with fewer than 10 rows (small-cell suppression). The API's
+database sessions are read-only. Full list and try-it-out at http://localhost:8000/docs.
 
 ## Project layout
 
 ```
 src/orisun_iwadi/
-├── domain/            dataset.py, records.py, quality.py   pure rules, no I/O
-├── application/       ports.py, ingest_dataset.py, provenance.py   use cases + interfaces
+├── domain/            dataset.py, records.py, quality.py, access.py   pure rules, no I/O
+├── application/       ports.py, ingest_dataset.py, provenance.py, queries.py, auth.py
 ├── adapters/
 │   ├── sources/       gdc, cbioportal, clinicaltrials, cdc, civic, http
-│   └── storage/       s3_raw_store.py, postgres_store.py, quarantine_store.py, catalog_store.py
+│   ├── security/      passwords.py (scrypt), tokens.py (JWT)
+│   └── storage/       S3 raw store, curated/quarantine/catalog/user/read stores, locks
 └── entrypoints/
-    └── dagster/       assets.py, resources.py, definitions.py
+    ├── dagster/       assets.py, resources.py, definitions.py
+    └── api/           app.py (FastAPI), users.py (user admin CLI)
 tests/
 ├── unit/              no services needed
 └── integration/       needs `make up`
@@ -119,6 +154,6 @@ tests/
 2. ~~Idempotent ETL for 5 datasets~~ ✅
 3. ~~Data-quality checks and a quarantine table~~ ✅
 4. ~~Metadata catalog for provenance~~ ✅
-5. Role-based FastAPI API (`entrypoints/api/`)
+5. ~~Role-based FastAPI API~~ ✅
 6. AWS with Terraform and least-privilege IAM
 7. CI/CD with GitHub Actions

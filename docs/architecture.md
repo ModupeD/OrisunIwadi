@@ -11,7 +11,7 @@ Imports only point inward. `domain` and `application` contain no framework or I/
 flowchart TB
     subgraph ENTRY["entrypoints (frameworks)"]
         DAG["dagster/<br/>assets · schedules · resources"]
-        API["api/ (planned)<br/>FastAPI routers"]
+        API["api/<br/>FastAPI routes, JWT roles"]
     end
     subgraph ADAPT["adapters (I/O)"]
         SRC["sources/<br/>gdc · cbioportal · clinicaltrials · cdc · civic"]
@@ -19,7 +19,7 @@ flowchart TB
         PGA["storage/postgres_store.py"]
     end
     subgraph APP["application (use cases)"]
-        UC["IngestDataset<br/>(QueryDataset planned)"]
+        UC["IngestDataset, DatasetQueries,<br/>Authenticate"]
         PORTS["ports:<br/>Source · RawSnapshotStore · CuratedStore"]
     end
     subgraph DOM["domain (rules)"]
@@ -37,11 +37,11 @@ flowchart TB
     PORTS --> ENT
 
     classDef planned stroke-dasharray: 5 5
-    class API planned
 ```
 
-The FastAPI app will follow the same rule. Routers live in `entrypoints/api/`, use cases in
-`application/`, and the read-only repository in `adapters/storage/`.
+The FastAPI app follows the same rule: routes in `entrypoints/api/`, use cases
+(`DatasetQueries`, `Authenticate`) in `application/`, roles in `domain/access.py`, and the
+read store, user store, password hashing and JWT code in `adapters/`.
 
 ## 2. Data flow
 
@@ -73,7 +73,6 @@ flowchart LR
     PG --> APIS["FastAPI, role-based"]
 
     classDef planned stroke-dasharray: 5 5
-    class APIS planned
 ```
 
 Every curated row stores `_record_hash`, `_raw_s3_uri` (the raw file it came from),
@@ -117,6 +116,47 @@ Quarantined rows are keyed by `(dataset, record_hash)`, so a bad row seen again 
 twice. Each asset has two Dagster asset checks: `quarantine_rate_ok` (warns above 5%) and
 `table_not_empty` (error).
 
+### Fault tolerance
+
+Goal: a bug or an outage in one part degrades that part only, never corrupts data, and the
+system recovers without manual restarts. Each row below has a test that makes the failure
+happen (`tests/integration/test_fault_tolerance.py`, `tests/unit/test_api.py`).
+
+| Failure | What happens |
+|---|---|
+| Bug or outage in one source | Only that dataset's step fails; the other datasets load. Transient errors are retried. |
+| Buggy transform produces wrong-but-valid rows | Safety brake: a run that quarantines over 20% of records, would change over 50% of existing rows, or fetches 0 records when data exists is rejected and rolled back. The last good data stays; the run is logged as failed with the reason. Override once with `allow_large_changes: true`. |
+| Crash mid-load | Each write is one transaction, so nothing half-written is left. The run lock is released by Postgres when the connection drops. |
+| Database down or slow | API stays up and answers 503 + `Retry-After` within ~3 s; `/ready` reports 503 so a load balancer routes away; it recovers by itself when the database is back. |
+| Slow or heavy API query | Cut off after 5 s (set on the database user and the connection). At most 10 connections per API copy and 20 queued requests; beyond that, instant 503. |
+| One side floods the database | Separate database users with separate connection limits (20 each), so the API can't starve the pipeline or the reverse. |
+| Bug in the API | The API's database user is read-only; it cannot change data. The pipeline's user cannot read logins. |
+
+Database users (`local/db-roles.sql`, applied by `make up`):
+
+| User | Access |
+|---|---|
+| `orisun_etl` | owns `oncology`, `quality`, `catalog`; no access to `auth` |
+| `orisun_api` | read-only on those schemas and `auth.users`; 5 s statement timeout |
+| admin | schema setup, user management, tests |
+
+Still single points of failure locally (one Postgres, one machine); on AWS these are covered by
+RDS Multi-AZ, 2+ API tasks across Availability Zones, and S3 (see section 3).
+
+### API access control
+
+| Role | Can use |
+|---|---|
+| `viewer` | dataset list, summaries, grouped counts (groups under 10 rows hidden) |
+| `researcher` | + row-level data with `?column=value` filters and paging |
+| `admin` | + quarantine and run log |
+
+- Login (`POST /auth/token`) returns a 30-minute JWT (HS256, algorithm pinned, issuer checked).
+- Passwords are hashed with scrypt; unknown users take as long to reject as wrong passwords.
+- Every API database session is read-only, so the API cannot change data even if it has a bug.
+- Dataset and column names from the URL are checked against the dataset definitions before any
+  SQL is built; values are always bound parameters.
+
 ## 3. AWS deployment (planned)
 
 ```mermaid
@@ -154,6 +194,6 @@ database secret. The API role has no S3 access and connects as a read-only datab
 | 2. ETL | 5 datasets → S3 + Postgres, idempotent, clean architecture | Done |
 | 3. Data quality | Validation, quarantine table, Dagster asset checks | Done |
 | 4. Metadata catalog | Provenance for every run, row-level lineage | Done |
-| 5. API | FastAPI + JWT roles | Next |
-| 6. AWS | Terraform: VPC, S3, RDS, ECS, IAM | Planned |
+| 5. API | FastAPI + JWT roles, read-only DB sessions | Done |
+| 6. AWS | Terraform: VPC, S3, RDS, ECS, IAM | Next |
 | 7. CI/CD | GitHub Actions | Planned |

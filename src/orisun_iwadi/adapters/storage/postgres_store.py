@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 import psycopg
@@ -10,7 +11,7 @@ from psycopg.types.json import Jsonb
 
 from ...application.ports import UpsertCounts
 from ...domain.dataset import Dataset
-from .ddl import existing_columns, run_ddl
+from .ddl import existing_columns, run_ddl, table_exists
 
 SCHEMA = "oncology"
 
@@ -28,11 +29,24 @@ class PostgresCuratedStore:
         self.conn = conn
         self.schema = schema
 
+    def existing_rows(self, dataset: Dataset) -> int:
+        if not table_exists(self.conn, self.schema, dataset.name):
+            return 0
+        n = self.conn.execute(sql.SQL("SELECT count(*) FROM {}").format(
+            self._table(dataset))).fetchone()[0]
+        self.conn.commit()
+        return n
+
     def upsert(self, dataset: Dataset, rows: list[dict[str, Any]], raw_uri: str,
-               run_id: str) -> UpsertCounts:
+               run_id: str,
+               approve: Callable[[UpsertCounts, int], None] | None = None) -> UpsertCounts:
         try:
             self._ensure_table(dataset)
+            before = self.conn.execute(sql.SQL("SELECT count(*) FROM {}").format(
+                self._table(dataset))).fetchone()[0]
             counts = self._upsert(dataset, rows, raw_uri, run_id)
+            if approve:
+                approve(counts, before)  # raising here rolls the whole load back
             self.conn.commit()
             return counts
         except Exception:

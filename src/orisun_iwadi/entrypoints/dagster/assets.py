@@ -8,8 +8,9 @@ from ...adapters.storage.postgres_lock import PostgresRunLock
 from ...adapters.storage.postgres_store import SCHEMA, PostgresCuratedStore
 from ...adapters.storage.quarantine_store import PostgresQuarantineStore
 from ...adapters.storage.s3_raw_store import S3RawSnapshotStore
-from ...application.ingest_dataset import IngestDataset, RunInfo
+from ...application.ingest_dataset import IngestDataset, LoadRejected, RunInfo
 from ...application.ports import Source
+from ...domain.guards import NO_LIMITS
 from ..version import code_version
 from .resources import PostgresResource, S3Resource
 
@@ -19,9 +20,15 @@ MAX_QUARANTINE_RATE = 0.05
 
 class IngestConfig(dg.Config):
     max_records: int | None = None  # e.g. 200 in the launchpad for a quick test run
+    # Turn off the safety brake for one run, after checking that a large change is real.
+    allow_large_changes: bool = False
 
 
-def build_asset(source: Source) -> dg.AssetsDefinition:
+RETRY = dg.RetryPolicy(max_retries=2, delay=30)
+
+
+def build_asset(source: Source,
+                retry_policy: dg.RetryPolicy | None = RETRY) -> dg.AssetsDefinition:
     ds = source.dataset
 
     @dg.asset(
@@ -32,7 +39,7 @@ def build_asset(source: Source) -> dg.AssetsDefinition:
         metadata={"source_url": ds.source_url, "table": f"{SCHEMA}.{ds.name}",
                   "primary_key": ", ".join(ds.primary_key)},
         # Also covers DatasetAlreadyRunning: wait for the other run, then try again.
-        retry_policy=dg.RetryPolicy(max_retries=2, delay=30),
+        retry_policy=retry_policy,
         check_specs=[
             dg.AssetCheckSpec("quarantine_rate_ok", asset=ds.name,
                               description=f"At most {MAX_QUARANTINE_RATE:.0%} of records "
@@ -52,8 +59,16 @@ def build_asset(source: Source) -> dg.AssetsDefinition:
                 lock=PostgresRunLock(conn),
                 log=context.log.info,
             )
-            run = RunInfo(run_id=context.run_id, code_version=code_version())
-            result = ingest(source, max_records=config.max_records, run=run)
+            run = RunInfo(run_id=context.run.run_id, code_version=code_version())
+            try:
+                result = ingest(source, max_records=config.max_records, run=run,
+                                limits=NO_LIMITS if config.allow_large_changes else None)
+            except LoadRejected as e:
+                # Retrying gives the same answer; the last good data stays in place.
+                raise dg.Failure(
+                    description=f"Load rejected, nothing was saved: {e}. If this change is "
+                                "expected, re-run with allow_large_changes: true.",
+                    allow_retries=False) from e
             table_rows = conn.execute(
                 f'SELECT count(*) FROM {SCHEMA}."{ds.name}"').fetchone()[0]
 
