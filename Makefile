@@ -60,7 +60,7 @@ image:            ## build the container image locally (the same one AWS runs)
 # --- AWS (see docs/aws.md) --------------------------------------------------------------------
 # Images are tagged with the git commit, so what runs on AWS is always a committed version.
 APP_NAME   ?= oncolake
-AWS_REGION ?= us-east-1
+AWS_REGION ?= us-east-2
 IMAGE_TAG  ?= $(shell git rev-parse --short=12 HEAD 2>/dev/null)
 # .env holds the local SeaweedFS keys; AWS commands must not use them. They use your own AWS
 # login instead (aws login / aws configure / AWS_PROFILE).
@@ -68,7 +68,8 @@ IMAGE_TAG  ?= $(shell git rev-parse --short=12 HEAD 2>/dev/null)
 # Set ONCOLAKE_AWS_ACCOUNT_ID in .env. Terraform refuses to change any other account.
 ONCOLAKE_AWS_PROFILE ?= oncolake
 AWS        := env -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN -u S3_ENDPOINT_URL \
-              AWS_PROFILE=$(ONCOLAKE_AWS_PROFILE) TF_VAR_aws_account_id=$(ONCOLAKE_AWS_ACCOUNT_ID)
+              AWS_PROFILE=$(ONCOLAKE_AWS_PROFILE) TF_VAR_aws_account_id=$(ONCOLAKE_AWS_ACCOUNT_ID) \
+              AWS_REGION=$(AWS_REGION) AWS_DEFAULT_REGION=$(AWS_REGION) TF_VAR_region=$(AWS_REGION)
 TF_BOOT    := $(AWS) terraform -chdir=infra/bootstrap
 TF         := $(AWS) terraform -chdir=infra/aws
 ECR_URL     = $(shell $(TF_BOOT) output -raw ecr_repository_url)
