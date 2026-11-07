@@ -86,11 +86,19 @@ same commands.
 
 ## Deploying
 
-You need an AWS account, the AWS CLI signed in (`aws login` or `aws configure`), Terraform 1.11+
-and Docker.
+You need an AWS account of your own, the AWS CLI (2.32+), Terraform 1.11+ and Docker.
+
+**Use a separate account for OncoLake.** A new account on the AWS free plan gets $100-200 in
+credits and is never charged. The deploy commands only work against the account you name, so
+they can't touch any other account you are signed in to.
 
 ```bash
-# Once
+# Once: sign in to the OncoLake account under its own profile (opens your browser;
+# short-lived credentials, no access keys saved on disk)
+aws login --profile oncolake
+# then in .env:  ONCOLAKE_AWS_ACCOUNT_ID=<the 12-digit account number>
+make aws-check                # confirms the profile is that account, refuses anything else
+
 make aws-bootstrap            # state bucket + image registry
 make aws-init                 # connect infra/aws to the state bucket
 cp infra/aws/terraform.tfvars.example infra/aws/terraform.tfvars   # set alert_email
@@ -128,5 +136,9 @@ bucket and image registry (from `aws-bootstrap`) are kept. API-user secrets crea
   Until then, narrow `allowed_cidrs` to your own IP address.
 - The Dagster UI isn't deployed; runs are recorded in `catalog.runs` (`/admin/runs`) and the
   pipeline logs are in CloudWatch (`/ecs/oncolake/etl`). Use `make dev` locally for the UI.
+- The daily CSV/Parquet download files are written to `s3://<raw bucket>/exports/` and kept 30
+  days. Without the Dagster UI there's no page with their links; download them from the S3
+  console, or through the API's export endpoints. (Links signed by a task's temporary
+  credentials stop working within hours, so on AWS they are only useful right after a run.)
 - The bootstrap stack keeps its Terraform state on your machine (`infra/bootstrap`). If it is
   lost, the two resources can be re-imported.

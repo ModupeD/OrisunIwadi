@@ -80,8 +80,9 @@ mock_provider "aws" {
 mock_provider "random" {}
 
 variables {
-  image_tag   = "abc123def456"
-  alert_email = "alerts@example.com"
+  aws_account_id = "123456789012"
+  image_tag      = "abc123def456"
+  alert_email    = "alerts@example.com"
 }
 
 run "default_uses_two_zones_and_one_nat" {

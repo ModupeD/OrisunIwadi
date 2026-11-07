@@ -21,7 +21,8 @@ terraform {
 }
 
 provider "aws" {
-  region = var.region
+  region              = var.region
+  allowed_account_ids = [var.aws_account_id] # refuses to run against any other account
   default_tags {
     tags = { Project = var.name, ManagedBy = "terraform", Stack = "aws" }
   }

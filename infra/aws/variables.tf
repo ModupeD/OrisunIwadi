@@ -1,3 +1,12 @@
+variable "aws_account_id" {
+  description = "The only AWS account this may change (a safety guard against deploying to the wrong one)."
+  type        = string
+  validation {
+    condition     = can(regex("^[0-9]{12}$", var.aws_account_id))
+    error_message = "aws_account_id must be the 12-digit account number."
+  }
+}
+
 variable "region" {
   type    = string
   default = "us-east-1"
