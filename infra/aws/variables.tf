@@ -62,6 +62,16 @@ variable "allowed_cidrs" {
   default     = ["0.0.0.0/0"]
 }
 
+variable "db_backup_retention_days" {
+  description = "Days of automatic database backups (how far back you can restore). 7 is the production default; the AWS free plan allows only 1."
+  type        = number
+  default     = 7
+  validation {
+    condition     = var.db_backup_retention_days >= 0 && var.db_backup_retention_days <= 35
+    error_message = "RDS keeps automatic backups for 0 (off) to 35 days."
+  }
+}
+
 variable "vpc_cidr" {
   type    = string
   default = "10.20.0.0/16"

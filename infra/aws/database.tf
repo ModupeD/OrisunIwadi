@@ -1,5 +1,5 @@
-# PostgreSQL on RDS, in subnets with no internet route. Encrypted, backed up daily (7 days of
-# point-in-time recovery), TLS required. With high_availability it is Multi-AZ: a standby in the
+# PostgreSQL on RDS, in subnets with no internet route. Encrypted, backed up daily (point-in-time
+# recovery for db_backup_retention_days: 7 by default, 1 on the free plan), TLS required. With high_availability it is Multi-AZ: a standby in the
 # other zone takes over automatically (about 1-2 minutes) if the primary or its zone fails.
 
 locals {
@@ -61,7 +61,7 @@ resource "aws_db_instance" "main" {
   publicly_accessible    = false
   parameter_group_name   = aws_db_parameter_group.main.name
 
-  backup_retention_period    = 7
+  backup_retention_period    = var.db_backup_retention_days
   backup_window              = "07:00-08:00"         # UTC, before the 6 AM Eastern load
   maintenance_window         = "sun:08:30-sun:09:30" # UTC
   auto_minor_version_upgrade = true
